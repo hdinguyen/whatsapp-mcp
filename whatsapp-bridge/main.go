@@ -18,7 +18,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/mdp/qrterminal"
+	qrcode "github.com/skip2/go-qrcode"
 
 	"bytes"
 
@@ -870,7 +870,12 @@ func main() {
 		for evt := range qrChan {
 			if evt.Event == "code" {
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				err := qrcode.WriteFile(evt.Code, qrcode.Medium, 256, "qr.png")
+				if err != nil {
+					logger.Errorf("Failed to write QR code to file: %v", err)
+					panic(err)
+				}
+				// qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 			} else if evt.Event == "success" {
 				connected <- true
 				break
