@@ -590,6 +590,10 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
+	if err := os.MkdirAll("qr", 0755); err != nil {
+		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
+	}
+
 	// Generate a local path for the file
 	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
 
