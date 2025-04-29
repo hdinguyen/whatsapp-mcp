@@ -870,7 +870,7 @@ func main() {
 		for evt := range qrChan {
 			if evt.Event == "code" {
 				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				err := qrcode.WriteFile(evt.Code, qrcode.Medium, 256, "qr.png")
+				err := qrcode.WriteFile(evt.Code, qrcode.Medium, 256, "qr/qr.png")
 				if err != nil {
 					logger.Errorf("Failed to write QR code to file: %v", err)
 					panic(err)

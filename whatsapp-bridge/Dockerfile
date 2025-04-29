@@ -26,6 +26,7 @@ RUN apk add --no-cache ca-certificates sqlite
 
 # Create directory for storing data
 RUN mkdir -p /app/store
+RUN mkdir -p /app/qr
 
 # Set working directory
 WORKDIR /app

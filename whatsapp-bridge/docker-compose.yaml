@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./store:/app/store
+      - ./qr:/app/qr
     ports:
       - "8081:8080"
     environment:
