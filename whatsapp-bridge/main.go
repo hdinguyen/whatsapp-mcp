@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -693,6 +694,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		return func(w http.ResponseWriter, r *http.Request) {
 			// If no API key is configured, skip authentication
 			if apiConfig.APIKey == "" {
+				fmt.Println("No API key provided. Authentication is disabled.")
 				next(w, r)
 				return
 			}
@@ -712,6 +714,226 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			next(w, r)
 		}
 	}
+
+	dbHandler := NewDBHandler(messageStore.db)
+
+	// Handler for searching contacts
+	http.HandleFunc("/api/contacts/search", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		query := r.URL.Query().Get("query")
+		if query == "" {
+			http.Error(w, "Query parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		contacts, err := dbHandler.SearchContacts(SearchContactsParams{Query: query})
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error searching contacts: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(contacts)
+	}))
+
+	// Handler for listing messages
+	http.HandleFunc("/api/messages", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse query parameters
+		params := ListMessagesParams{
+			ChatJID:         r.URL.Query().Get("chat_jid"),
+			SenderPhoneNumber: r.URL.Query().Get("sender"),
+			Query:           r.URL.Query().Get("query"),
+			IncludeContext:  r.URL.Query().Get("include_context") == "true",
+		}
+
+		// Parse limit and page
+		if limit := r.URL.Query().Get("limit"); limit != "" {
+			if l, err := strconv.Atoi(limit); err == nil && l > 0 {
+				params.Limit = l
+			} else {
+				params.Limit = 20 // Default
+			}
+		} else {
+			params.Limit = 20
+		}
+
+		if page := r.URL.Query().Get("page"); page != "" {
+			if p, err := strconv.Atoi(page); err == nil && p >= 0 {
+				params.Page = p
+			}
+		}
+
+		// Parse context params
+		if contextBefore := r.URL.Query().Get("context_before"); contextBefore != "" {
+			if cb, err := strconv.Atoi(contextBefore); err == nil && cb >= 0 {
+				params.ContextBefore = cb
+			} else {
+				params.ContextBefore = 1
+			}
+		} else {
+			params.ContextBefore = 1
+		}
+
+		if contextAfter := r.URL.Query().Get("context_after"); contextAfter != "" {
+			if ca, err := strconv.Atoi(contextAfter); err == nil && ca >= 0 {
+				params.ContextAfter = ca
+			} else {
+				params.ContextAfter = 1
+			}
+		} else {
+			params.ContextAfter = 1
+		}
+
+		// Parse date filters
+		if after := r.URL.Query().Get("after"); after != "" {
+			if t, err := time.Parse(time.RFC3339, after); err == nil {
+				params.After = &t
+			}
+		}
+
+		if before := r.URL.Query().Get("before"); before != "" {
+			if t, err := time.Parse(time.RFC3339, before); err == nil {
+				params.Before = &t
+			}
+		}
+
+		messages, err := dbHandler.ListMessages(params)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error listing messages: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(messages)
+	}))
+
+	// Handler for listing chats
+	http.HandleFunc("/api/chats", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse query parameters
+		params := ListChatsParams{
+			Query:             r.URL.Query().Get("query"),
+			IncludeLastMessage: r.URL.Query().Get("include_last_message") != "false", // Default true
+			SortBy:            r.URL.Query().Get("sort_by"),
+		}
+
+		// Default sort by last_active if not specified
+		if params.SortBy == "" {
+			params.SortBy = "last_active"
+		}
+
+		// Parse limit and page
+		if limit := r.URL.Query().Get("limit"); limit != "" {
+			if l, err := strconv.Atoi(limit); err == nil && l > 0 {
+				params.Limit = l
+			} else {
+				params.Limit = 20 // Default
+			}
+		} else {
+			params.Limit = 20
+		}
+
+		if page := r.URL.Query().Get("page"); page != "" {
+			if p, err := strconv.Atoi(page); err == nil && p >= 0 {
+				params.Page = p
+			}
+		}
+
+		chats, err := dbHandler.ListChats(params)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error listing chats: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chats)
+	}))
+
+	// Handler for getting a chat
+	http.HandleFunc("/api/chat", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		chatJID := r.URL.Query().Get("jid")
+		if chatJID == "" {
+			http.Error(w, "Chat JID is required", http.StatusBadRequest)
+			return
+		}
+
+		includeLastMessage := r.URL.Query().Get("include_last_message") != "false" // Default true
+		
+		chat, err := dbHandler.GetChat(chatJID, includeLastMessage)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error getting chat: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chat)
+	}))
+
+	// Handler for getting message context
+	http.HandleFunc("/api/message/context", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		messageID := r.URL.Query().Get("message_id")
+		if messageID == "" {
+			http.Error(w, "Message ID is required", http.StatusBadRequest)
+			return
+		}
+
+		params := MessageContextParams{
+			MessageID: messageID,
+		}
+
+		// Parse context params
+		if before := r.URL.Query().Get("before"); before != "" {
+			if b, err := strconv.Atoi(before); err == nil && b >= 0 {
+				params.Before = b
+			} else {
+				params.Before = 5 // Default
+			}
+		} else {
+			params.Before = 5
+		}
+
+		if after := r.URL.Query().Get("after"); after != "" {
+			if a, err := strconv.Atoi(after); err == nil && a >= 0 {
+				params.After = a
+			} else {
+				params.After = 5 // Default
+			}
+		} else {
+			params.After = 5
+		}
+
+		context, err := dbHandler.GetMessageContext(params)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error getting message context: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(context)
+	}))
 
 	// Handler for sending messages
 	http.HandleFunc("/api/send", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -808,6 +1030,14 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Filename: filename,
 			Path:     path,
 		})
+	}))
+
+	http.HandleFunc("/api/list_chats", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		// Only allow POST requests
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 	}))
 
 	// Start the server
