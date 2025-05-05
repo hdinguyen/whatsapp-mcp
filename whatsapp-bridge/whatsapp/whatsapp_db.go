@@ -446,8 +446,6 @@ func (wa *WhatsApp) ListChats(
 	queryParts = append(queryParts, "LIMIT ? OFFSET ?")
 	params = append(params, limit, offset)
 
-	debugQuery := strings.Join(queryParts, " ")
-	fmt.Println(debugQuery)
 	// Execute the query
 	rows, err := wa.db.Query(strings.Join(queryParts, " "), params...)
 	if err != nil {
@@ -461,7 +459,7 @@ func (wa *WhatsApp) ListChats(
 		var lastMessageTimeStr sql.NullString
 		var lastMessage sql.NullString
 		var lastSender sql.NullString
-		var lastIsFromMe sql.NullInt64
+		var lastIsFromMe sql.NullBool
 		var name sql.NullString
 
 		err := rows.Scan(
@@ -495,7 +493,7 @@ func (wa *WhatsApp) ListChats(
 		}
 
 		if lastIsFromMe.Valid {
-			chat.LastIsFromMe = lastIsFromMe.Int64 != 0
+			chat.LastIsFromMe = lastIsFromMe.Bool != false
 		}
 
 		chats = append(chats, chat)
