@@ -1,22 +1,35 @@
 from typing import List, Dict, Any, Optional
+import requests
+import os
+import json
+from datetime import datetime
 from mcp.server.fastmcp import FastMCP
-from whatsapp import (
-    search_contacts as whatsapp_search_contacts,
-    list_messages as whatsapp_list_messages,
-    list_chats as whatsapp_list_chats,
-    get_chat as whatsapp_get_chat,
-    get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
-    get_contact_chats as whatsapp_get_contact_chats,
-    get_last_interaction as whatsapp_get_last_interaction,
-    get_message_context as whatsapp_get_message_context,
-    send_message as whatsapp_send_message,
-    send_file as whatsapp_send_file,
-    send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
-)
+
+# API configuration
+WHATSAPP_API_BASE_URL = os.environ.get("BRIDGE_API_URL", "http://localhost:8080/api")
+headers = {"x-api-key": os.environ.get("WHATSAPP_API_KEY", "ReplaceWithYourAPIKey")}
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
+
+def make_api_request(endpoint: str, method: str = "POST", payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Helper method to make API requests to the WhatsApp API server."""
+    url = f"{WHATSAPP_API_BASE_URL}/{endpoint}"
+    
+    try:
+        if method.upper() == "GET":
+            response = requests.get(url, headers=headers, params=payload)
+        else:
+            response = requests.post(url, json=payload, headers=headers)
+        
+        response.raise_for_status()
+        return response.text
+    except requests.RequestException as e:
+        print(f"API request error: {str(e)}")
+        return {"success": False, "error": str(e)}
+    except json.JSONDecodeError as e:
+        print(f"Error parsing response from server: {str(e)}")
+        return {"success": False, "error": "Invalid JSON response"}
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Dict[str, Any]]:
@@ -25,8 +38,9 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
     Args:
         query: Search term to match against contact names or phone numbers
     """
-    contacts = whatsapp_search_contacts(query)
-    return contacts
+    response = make_api_request("contacts/search", "GET", {"query": query})
+    
+    return response
 
 @mcp.tool()
 def list_messages(
@@ -55,19 +69,32 @@ def list_messages(
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
     """
-    messages = whatsapp_list_messages(
-        after=after,
-        before=before,
-        sender_phone_number=sender_phone_number,
-        chat_jid=chat_jid,
-        query=query,
-        limit=limit,
-        page=page,
-        include_context=include_context,
-        context_before=context_before,
-        context_after=context_after
-    )
-    return messages
+    payload = {
+        "limit": limit,
+        "page": page,
+        "include_context": include_context,
+        "context_before": context_before,
+        "context_after": context_after
+    }
+    
+    if after:
+        payload["after"] = after
+    
+    if before:
+        payload["before"] = before
+    
+    if sender_phone_number:
+        payload["sender_phone_number"] = sender_phone_number
+    
+    if chat_jid:
+        payload["chat_jid"] = chat_jid
+    
+    if query:
+        payload["query"] = query
+    
+    response = make_api_request("messages", "GET", payload)
+    
+    return response
 
 @mcp.tool()
 def list_chats(
@@ -86,15 +113,16 @@ def list_chats(
         include_last_message: Whether to include the last message in each chat (default True)
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
     """
-    chats = whatsapp_list_chats(
-        query=query,
-        limit=limit,
-        page=page,
-        include_last_message=include_last_message,
-        sort_by=sort_by
-    )
-    return chats
-
+    payload = {
+        "query": query,
+        "limit": limit,
+        "page": page,
+        "include_last_message": include_last_message,
+        "sort_by": sort_by
+    }
+    
+    return make_api_request("chats", "GET", payload)
+    
 @mcp.tool()
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
@@ -103,8 +131,12 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]
         chat_jid: The JID of the chat to retrieve
         include_last_message: Whether to include the last message (default True)
     """
-    chat = whatsapp_get_chat(chat_jid, include_last_message)
-    return chat
+    payload = {
+        "chat_jid": chat_jid,
+        "include_last_message": include_last_message
+    }
+    
+    return make_api_request("chat", "GET", payload)
 
 @mcp.tool()
 def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
@@ -113,8 +145,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
     Args:
         sender_phone_number: The phone number to search for
     """
-    chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
-    return chat
+    payload = {"phone_number": sender_phone_number}
+    
+    return make_api_request("chats/by-contact", "GET", payload)
 
 @mcp.tool()
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
@@ -125,18 +158,25 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
-    chats = whatsapp_get_contact_chats(jid, limit, page)
-    return chats
+    payload = {
+        "jid": jid,
+        "limit": limit,
+        "page": page
+    }
+    
+    return make_api_request("contacts/chats", "GET", payload)
+    
 
 @mcp.tool()
-def get_last_interaction(jid: str) -> str:
+def get_last_interaction(jid: str) -> Dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
     
     Args:
         jid: The JID of the contact to search for
     """
-    message = whatsapp_get_last_interaction(jid)
-    return message
+    payload = {"jid": jid}
+    
+    return make_api_request("contacts/last-interaction", "GET", payload)
 
 @mcp.tool()
 def get_message_context(
@@ -151,9 +191,14 @@ def get_message_context(
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
     """
-    context = whatsapp_get_message_context(message_id, before, after)
-    return context
-
+    payload = {
+        "message_id": message_id,
+        "before": before,
+        "after": after
+    }
+    
+    return make_api_request("message/context", "GET", payload)
+    
 @mcp.tool()
 def send_message(
     recipient: str,
@@ -176,12 +221,12 @@ def send_message(
             "message": "Recipient must be provided"
         }
     
-    # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
-    return {
-        "success": success,
-        "message": status_message
+    payload = {
+        "recipient": recipient,
+        "message": message
     }
+    
+    return make_api_request("send", "POST", payload)
 
 @mcp.tool()
 def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
@@ -195,13 +240,31 @@ def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
     Returns:
         A dictionary containing success status and a status message
     """
+    # Validate input
+    if not recipient:
+        return {
+            "success": False,
+            "message": "Recipient must be provided"
+        }
     
-    # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path)
-    return {
-        "success": success,
-        "message": status_message
+    if not media_path:
+        return {
+            "success": False,
+            "message": "Media path must be provided"
+        }
+    
+    if not os.path.isfile(media_path):
+        return {
+            "success": False,
+            "message": f"Media file not found: {media_path}"
+        }
+    
+    payload = {
+        "recipient": recipient,
+        "media_path": media_path
     }
+    
+    return make_api_request("send", "POST", payload)
 
 @mcp.tool()
 def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
@@ -215,11 +278,34 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
-    return {
-        "success": success,
-        "message": status_message
+    # Validate input
+    if not recipient:
+        return {
+            "success": False,
+            "message": "Recipient must be provided"
+        }
+    
+    if not media_path:
+        return {
+            "success": False,
+            "message": "Media path must be provided"
+        }
+    
+    if not os.path.isfile(media_path):
+        return {
+            "success": False,
+            "message": f"Media file not found: {media_path}"
+        }
+    
+    # No need to convert to opus here, as the bridge API handles this
+    
+    payload = {
+        "recipient": recipient,
+        "media_path": media_path,
+        "is_audio": True
     }
+    
+    return make_api_request("send", "POST", payload)
 
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
@@ -232,19 +318,12 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     Returns:
         A dictionary containing success status, a status message, and the file path if successful
     """
-    file_path = whatsapp_download_media(message_id, chat_jid)
+    payload = {
+        "message_id": message_id,
+        "chat_jid": chat_jid
+    }
     
-    if file_path:
-        return {
-            "success": True,
-            "message": "Media downloaded successfully",
-            "file_path": file_path
-        }
-    else:
-        return {
-            "success": False,
-            "message": "Failed to download media"
-        }
+    return make_api_request("download", "POST", payload)
 
 if __name__ == "__main__":
     # Initialize and run the server
