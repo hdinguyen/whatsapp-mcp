@@ -30,6 +30,8 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+	"whatsapp-client/whatsapp"
+
 )
 
 // Message represents a chat message for our client
@@ -276,6 +278,10 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		case "mov":
 			mediaType = whatsmeow.MediaVideo
 			mimeType = "video/quicktime"
+
+		case "pdf":
+			mediaType = whatsmeow.MediaDocument
+			mimeType = "application/pdf"
 
 		// Document types (for any other file type)
 		default:
@@ -681,7 +687,7 @@ func extractDirectPathFromURL(url string) string {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, waDB *whatsapp.WhatsApp, port int) {
 	// API key configuration
 	apiConfig := struct {
 		APIKey string
@@ -715,8 +721,6 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 	}
 
-	dbHandler := NewDBHandler(messageStore.db)
-
 	// Handler for searching contacts
 	http.HandleFunc("/api/contacts/search", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -730,7 +734,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		contacts, err := dbHandler.SearchContacts(SearchContactsParams{Query: query})
+		contacts, err := waDB.SearchContacts(query)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error searching contacts: %v", err), http.StatusInternalServerError)
 			return
@@ -748,72 +752,58 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Parse query parameters
-		params := ListMessagesParams{
-			ChatJID:         r.URL.Query().Get("chat_jid"),
-			SenderPhoneNumber: r.URL.Query().Get("sender"),
-			Query:           r.URL.Query().Get("query"),
-			IncludeContext:  r.URL.Query().Get("include_context") == "true",
-		}
-
+		after := r.URL.Query().Get("after")
+		before := r.URL.Query().Get("before")
+		senderPhoneNumber := r.URL.Query().Get("sender")
+		chatJID := r.URL.Query().Get("chat_jid")
+		query := r.URL.Query().Get("query")
+		includeContext := r.URL.Query().Get("include_context") == "true"
+		
 		// Parse limit and page
-		if limit := r.URL.Query().Get("limit"); limit != "" {
-			if l, err := strconv.Atoi(limit); err == nil && l > 0 {
-				params.Limit = l
-			} else {
-				params.Limit = 20 // Default
-			}
-		} else {
-			params.Limit = 20
-		}
-
-		if page := r.URL.Query().Get("page"); page != "" {
-			if p, err := strconv.Atoi(page); err == nil && p >= 0 {
-				params.Page = p
+		limit := 20 // Default
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+				limit = l
 			}
 		}
-
+		
+		page := 0 // Default
+		if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+			if p, err := strconv.Atoi(pageStr); err == nil && p >= 0 {
+				page = p
+			}
+		}
+		
 		// Parse context params
-		if contextBefore := r.URL.Query().Get("context_before"); contextBefore != "" {
-			if cb, err := strconv.Atoi(contextBefore); err == nil && cb >= 0 {
-				params.ContextBefore = cb
-			} else {
-				params.ContextBefore = 1
+		contextBefore := 1 // Default
+		if ctxBeforeStr := r.URL.Query().Get("context_before"); ctxBeforeStr != "" {
+			if cb, err := strconv.Atoi(ctxBeforeStr); err == nil && cb >= 0 {
+				contextBefore = cb
 			}
-		} else {
-			params.ContextBefore = 1
 		}
-
-		if contextAfter := r.URL.Query().Get("context_after"); contextAfter != "" {
-			if ca, err := strconv.Atoi(contextAfter); err == nil && ca >= 0 {
-				params.ContextAfter = ca
-			} else {
-				params.ContextAfter = 1
-			}
-		} else {
-			params.ContextAfter = 1
-		}
-
-		// Parse date filters
-		if after := r.URL.Query().Get("after"); after != "" {
-			if t, err := time.Parse(time.RFC3339, after); err == nil {
-				params.After = &t
+		
+		contextAfter := 1 // Default
+		if ctxAfterStr := r.URL.Query().Get("context_after"); ctxAfterStr != "" {
+			if ca, err := strconv.Atoi(ctxAfterStr); err == nil && ca >= 0 {
+				contextAfter = ca
 			}
 		}
 
-		if before := r.URL.Query().Get("before"); before != "" {
-			if t, err := time.Parse(time.RFC3339, before); err == nil {
-				params.Before = &t
-			}
-		}
+		result := waDB.ListMessages(
+			after,
+			before,
+			senderPhoneNumber,
+			chatJID,
+			query,
+			limit,
+			page,
+			includeContext,
+			contextBefore,
+			contextAfter,
+		)
 
-		messages, err := dbHandler.ListMessages(params)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Error listing messages: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(messages)
+		w.Header().Set("Content-Type", "text/plain") // Using plain text since we're getting formatted text
+		w.Write([]byte(result))
 	}))
 
 	// Handler for listing chats
@@ -824,37 +814,100 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		}
 
 		// Parse query parameters
-		params := ListChatsParams{
-			Query:             r.URL.Query().Get("query"),
-			IncludeLastMessage: r.URL.Query().Get("include_last_message") != "false", // Default true
-			SortBy:            r.URL.Query().Get("sort_by"),
-		}
-
-		// Default sort by last_active if not specified
-		if params.SortBy == "" {
-			params.SortBy = "last_active"
+		query := r.URL.Query().Get("query")
+		includeLastMessage := r.URL.Query().Get("include_last_message") != "false" // Default true
+		sortBy := r.URL.Query().Get("sort_by")
+		
+		// Default sort by timestamp if not specified
+		if sortBy == "" {
+			sortBy = "last_active"
 		}
 
 		// Parse limit and page
-		if limit := r.URL.Query().Get("limit"); limit != "" {
-			if l, err := strconv.Atoi(limit); err == nil && l > 0 {
-				params.Limit = l
-			} else {
-				params.Limit = 20 // Default
+		limit := 20 // Default
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+				limit = l
 			}
-		} else {
-			params.Limit = 20
 		}
-
-		if page := r.URL.Query().Get("page"); page != "" {
-			if p, err := strconv.Atoi(page); err == nil && p >= 0 {
-				params.Page = p
+		
+		page := 0 // Default
+		if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+			if p, err := strconv.Atoi(pageStr); err == nil && p >= 0 {
+				page = p
 			}
 		}
 
-		chats, err := dbHandler.ListChats(params)
+		chats, err := waDB.ListChats(query, limit, page, includeLastMessage, sortBy)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error listing chats: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chats)
+	}))
+
+	http.HandleFunc("/api/chats/by-contact", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse query parameters
+		phoneNumber := r.URL.Query().Get("phone_number")
+		if phoneNumber == "" {
+			http.Error(w, "Phone number is required", http.StatusBadRequest)
+			return
+		}
+
+		chat, err := waDB.GetDirectChatByContact(phoneNumber)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error getting chat by contact: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		if chat == nil {
+			http.Error(w, "Chat not found for the provided phone number", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chat)
+	}))
+
+	http.HandleFunc("/api/contacts/chats", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Parse query parameters
+		jid := r.URL.Query().Get("jid")
+		if jid == "" {
+			http.Error(w, "Contact JID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Parse limit parameter
+		limit := 50 // Default
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+				limit = l
+			}
+		}
+
+		// Parse page parameter
+		page := 0 // Default
+		if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+			if p, err := strconv.Atoi(pageStr); err == nil && p >= 0 {
+				page = p
+			}
+		}
+
+		chats, err := waDB.GetContactChats(jid, limit, page)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error getting contact chats: %v", err), http.StatusInternalServerError)
 			return
 		}
 
@@ -869,7 +922,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		chatJID := r.URL.Query().Get("jid")
+		chatJID := r.URL.Query().Get("chat_jid")
 		if chatJID == "" {
 			http.Error(w, "Chat JID is required", http.StatusBadRequest)
 			return
@@ -877,7 +930,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		includeLastMessage := r.URL.Query().Get("include_last_message") != "false" // Default true
 		
-		chat, err := dbHandler.GetChat(chatJID, includeLastMessage)
+		chat, err := waDB.GetChat(chatJID, includeLastMessage)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error getting chat: %v", err), http.StatusInternalServerError)
 			return
@@ -900,32 +953,22 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		params := MessageContextParams{
-			MessageID: messageID,
-		}
-
 		// Parse context params
-		if before := r.URL.Query().Get("before"); before != "" {
-			if b, err := strconv.Atoi(before); err == nil && b >= 0 {
-				params.Before = b
-			} else {
-				params.Before = 5 // Default
+		before := 5 // Default
+		if beforeStr := r.URL.Query().Get("before"); beforeStr != "" {
+			if b, err := strconv.Atoi(beforeStr); err == nil && b >= 0 {
+				before = b
 			}
-		} else {
-			params.Before = 5
+		}
+		
+		after := 5 // Default
+		if afterStr := r.URL.Query().Get("after"); afterStr != "" {
+			if a, err := strconv.Atoi(afterStr); err == nil && a >= 0 {
+				after = a
+			}
 		}
 
-		if after := r.URL.Query().Get("after"); after != "" {
-			if a, err := strconv.Atoi(after); err == nil && a >= 0 {
-				params.After = a
-			} else {
-				params.After = 5 // Default
-			}
-		} else {
-			params.After = 5
-		}
-
-		context, err := dbHandler.GetMessageContext(params)
+		context, err := waDB.GetMessageContext(messageID, before, after)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Error getting message context: %v", err), http.StatusInternalServerError)
 			return
@@ -933,6 +976,33 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(context)
+	}))
+
+	http.HandleFunc("/api/contacts/last-interaction", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Get JID parameter
+		jid := r.URL.Query().Get("jid")
+		if jid == "" {
+			http.Error(w, "JID parameter is required", http.StatusBadRequest)
+			return
+		}
+
+		// Get the last interaction for the contact
+		lastInteraction := waDB.GetLastInteraction(jid)
+		if lastInteraction == "" {
+			// Return empty response if no interaction found
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"interaction": ""})
+			return
+		}
+
+		// Return the formatted last interaction
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"interaction": lastInteraction})
 	}))
 
 	// Handler for sending messages
@@ -1057,15 +1127,23 @@ func main() {
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
-	// Create database connection for storing session data
-	dbLog := waLog.Stdout("Database", "INFO", true)
-
 	// Create directory for database if it doesn't exist
 	if err := os.MkdirAll("store", 0755); err != nil {
 		logger.Errorf("Failed to create store directory: %v", err)
 		return
 	}
 
+	// Initialize the WhatsApp DB helper
+	dbPath := filepath.Join("store", "messages.db")
+	waDB, err := whatsapp.NewWhatsApp(dbPath)
+	if err != nil {
+		logger.Errorf("Failed to initialize WhatsApp DB: %v", err)
+		return
+	}
+	defer waDB.Close()
+
+	// Create database connection for storing session data
+	dbLog := waLog.Stdout("Database", "INFO", true)
 	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
@@ -1176,8 +1254,8 @@ func main() {
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
-	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
+	// Start REST API server with the WhatsApp DB instance
+	startRESTServer(client, messageStore, waDB, 8080)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
